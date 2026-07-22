@@ -1,3 +1,4 @@
+using SourceAFIS;
 using DPUruNet;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -435,6 +436,107 @@ public class BioService
     {
         // RESPUESTA INSTANTÁNEA DESDE MEMORIA
         return _statusMessage;
+    }
+
+    /// <summary>
+    /// Verifica huellas recibiendo imágenes en Base64 (PNG/JPEG) en lugar de plantillas FMD.
+    /// Utiliza SourceAFIS para el matching, replicando la lógica del antiguo microservicio Java.
+    /// </summary>
+    public static async Task<MiddlewareVerifyResult> VerifyFingerprintFromPngAsync(List<string> candidatePngsBase64, CancellationToken ct, int timeoutMs = 15000)
+    {
+        // 1. Capturamos el dedo del lector local (esto nos devuelve el Base64Image)
+        var captureResult = await CaptureFingerprintAsync(ct, timeoutMs);
+        
+        if (!captureResult.Success || string.IsNullOrEmpty(captureResult.Base64Image))
+        {
+            return new MiddlewareVerifyResult 
+            { 
+                Success = false, 
+                Message = captureResult.Message, 
+                Match = false 
+            };
+        }
+
+        try
+        {
+            // 2. Extraer los bytes del PNG capturado
+            string probeCleaned = CleanBase64(captureResult.Base64Image);
+            byte[] probeBytes = Convert.FromBase64String(probeCleaned);
+
+            // 3. Crear el Template de SourceAFIS desde el PNG capturado (probe)
+            // Se asume 500 DPI como en el lector U.are.U 5160
+            FingerprintImage probeImg = new FingerprintImage(probeBytes, new FingerprintImageOptions { Dpi = 500 });
+            FingerprintTemplate probeTemplate = new FingerprintTemplate(probeImg);
+            
+            // Instanciar el matcher de SourceAFIS con la huella de prueba
+            var matcher = new FingerprintMatcher(probeTemplate);
+            
+            double highestScore = 0.0;
+            double threshold = 40.0; // Umbral estándar de SourceAFIS (score >= 40)
+            int matchedIndex = -1;
+
+            // 4. Iterar sobre los PNGs candidatos enviados por el cliente
+            for (int i = 0; i < candidatePngsBase64.Count; i++)
+            {
+                string candBase64 = candidatePngsBase64[i];
+                if (string.IsNullOrEmpty(candBase64)) continue;
+                
+                // Si viene prefijado con data:image/png;base64,, lo limpiamos
+                if (candBase64.Contains(",")) 
+                {
+                    candBase64 = candBase64.Split(',')[1];
+                }
+                
+                candBase64 = CleanBase64(candBase64);
+                byte[] candBytes = Convert.FromBase64String(candBase64);
+
+                try 
+                {
+                    FingerprintImage candImg = new FingerprintImage(candBytes, new FingerprintImageOptions { Dpi = 500 });
+                    FingerprintTemplate candTemplate = new FingerprintTemplate(candImg);
+                    
+                    double score = matcher.Match(candTemplate);
+                    
+                    if (score > highestScore)
+                    {
+                        highestScore = score;
+                    }
+
+                    if (score >= threshold)
+                    {
+                        return new MiddlewareVerifyResult 
+                        { 
+                            Success = true, 
+                            Message = "Huella verificada con éxito (Legacy PNG).", 
+                            Match = true,
+                            Score = (int)score,
+                            MatchedIndex = i,
+                            Base64Image = captureResult.Base64Image,
+                            FmdBase64 = captureResult.FmdBase64
+                        };
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Ignoramos errores de un PNG corrupto y continuamos con el siguiente
+                    Console.WriteLine($"[BioService] Error procesando candidato {i}: {ex.Message}");
+                }
+            }
+
+            return new MiddlewareVerifyResult 
+            { 
+                Success = true, 
+                Message = $"Huella distinta detectada. (Score máximo: {highestScore:F2})", 
+                Match = false,
+                Score = (int)highestScore,
+                Base64Image = captureResult.Base64Image,
+                FmdBase64 = captureResult.FmdBase64
+            };
+        }
+        catch (Exception ex)
+        {
+            return new MiddlewareVerifyResult { Success = false, Message = $"Error de validación Legacy: {ex.Message}", Match = false };
+        }
     }
 
     private static string CreateBitmapFromView(Fid.Fiv view)

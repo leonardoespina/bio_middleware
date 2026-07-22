@@ -58,6 +58,28 @@ app.MapGet("/api/capture", async (HttpContext context) =>
     }
 });
 
+app.MapPost("/api/verify-legacy", async (VerifyRequest req, HttpContext context) => 
+{
+    try 
+    {
+        if (req.Templates == null || req.Templates.Count == 0)
+        {
+            return Results.BadRequest(new { success = false, message = "No se proporcionaron imágenes PNG para comparar." });
+        }
+
+        var result = await BioService.VerifyFingerprintFromPngAsync(req.Templates, context.RequestAborted);
+        return Results.Ok(result);
+    }
+    catch (OperationCanceledException)
+    {
+        return Results.StatusCode(499);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(ex.Message);
+    }
+});
+
 app.MapPost("/api/verify", async (VerifyRequest req, HttpContext context) => 
 {
     try 
